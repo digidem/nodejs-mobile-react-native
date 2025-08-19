@@ -13,7 +13,7 @@ JNIEnv* cacheEnvPointer=NULL;
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_sendMessageToNodeChannel(
+Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_sendMessageToNodeChannel(
         JNIEnv *env,
         jobject /* this */,
         jstring channelName,
@@ -45,7 +45,7 @@ extern "C" int callintoNode(int argc, char *argv[])
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_getCurrentABIName(
+Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_getCurrentABIName(
     JNIEnv *env,
     jobject /* this */) {
     return env->NewStringUTF(CURRENT_ABI_NAME);
@@ -53,7 +53,7 @@ Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_getCurrentABIName(
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_registerNodeDataDirPath(
+Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_registerNodeDataDirPath(
     JNIEnv *env,
     jobject /* this */,
     jstring dataDir) {
@@ -67,7 +67,7 @@ Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_registerNodeDataDi
 void rcv_message(const char* channel_name, const char* msg) {
   JNIEnv *env=cacheEnvPointer;
   if(!env) return;
-  jclass cls2 = env->FindClass("com/janeasystems/rn_nodejs_mobile/RNNodeJsMobileModule");  // try to find the class
+  jclass cls2 = env->FindClass("com/nodejsmobile/reactnative/RNNodeJsMobileModule");  // try to find the class
   if(cls2 != nullptr) {
     jmethodID m_sendMessage = env->GetStaticMethodID(cls2, "sendMessageToApplication", "(Ljava/lang/String;Ljava/lang/String;)V");  // find method
     if(m_sendMessage != nullptr) {
@@ -138,7 +138,7 @@ int start_redirecting_stdout_stderr() {
 
 //node's libUV requires all arguments being on contiguous memory.
 extern "C" jint JNICALL
-Java_com_janeasystems_rn_1nodejs_1mobile_RNNodeJsMobileModule_startNodeWithArguments(
+Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
         JNIEnv *env,
         jobject /* this */,
         jobjectArray arguments,

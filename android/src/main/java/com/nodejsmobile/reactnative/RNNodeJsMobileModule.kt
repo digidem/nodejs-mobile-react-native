@@ -1,4 +1,4 @@
-package com.janeasystems.rn_nodejs_mobile
+package com.nodejsmobile.reactnative
 
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -22,8 +22,24 @@ import java.io.*
 import java.util.*
 import java.util.concurrent.Semaphore
 
-class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext), LifecycleEventListener {
+import expo.modules.kotlin.modules.Module
+import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.exception.Exceptions
+
+class RNNodeJsMobileModule : Module() {
+    private val reactContext: Context
+        get() = appContext.reactContext ?: throw Exceptions.ReactContextLost()
+    private  var trashDirPath: String
+    private  var filesDirPath: String
+    private  var nodeJsProjectPath: String
+    private  var builtinModulesPath: String
+    private  var nativeAssetsPath: String
+    private var lastUpdateTime: Long = 1
+    private var previousLastUpdateTime: Long = 0
+    private val initSemaphore = Semaphore(1)
+    private var initCompleted = false
+
+    private lateinit var assetManager: AssetManager
 
     companion object {
         private const val TAG = "NODEJS-RN"
@@ -35,34 +51,19 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         private const val BUILTIN_NATIVE_ASSETS_PREFIX = "nodejs-native-assets-"
         private const val SYSTEM_CHANNEL = "_SYSTEM_"
 
-        private lateinit var trashDirPath: String
-        private lateinit var filesDirPath: String
-        private lateinit var nodeJsProjectPath: String
-        private lateinit var builtinModulesPath: String
-        private lateinit var nativeAssetsPath: String
-
-        private var lastUpdateTime: Long = 1
-        private var previousLastUpdateTime: Long = 0
-        private val initSemaphore = Semaphore(1)
-        private var initCompleted = false
-
-        private lateinit var assetManager: AssetManager
-
+        // To store the instance when node is started.
+        var instance: RNNodeJsMobileModule? = null
+            private set
+        // We just want one instance of node running in the background.
+        var startedNodeAlready = false
+            private set
         // Flag to indicate if node is ready to receive app events.
-        private var nodeIsReadyForAppEvents = false
+        var nodeIsReadyForAppEvents = false
 
         init {
             System.loadLibrary("nodejs-mobile-react-native-native-lib")
             System.loadLibrary("node")
         }
-
-        // To store the instance when node is started.
-        var instance: RNNodeJsMobileModule? = null
-            private set
-
-        // We just want one instance of node running in the background.
-        var startedNodeAlready = false
-            private set
 
         fun sendMessageToApplication(channelName: String, msg: String) {
             if (channelName == SYSTEM_CHANNEL) {
@@ -153,8 +154,6 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private val reactContext: ReactApplicationContext = reactContext
-
     init {
         this.reactContext.addLifecycleEventListener(this)
         filesDirPath = this.reactContext.filesDir.absolutePath
@@ -202,8 +201,6 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    override fun getName(): String = "RNNodeJsMobile"
-
     // Extracts the option to redirect stdout and stderr to logcat
     private fun extractRedirectOutputToLogcatOption(options: ReadableMap?): Boolean {
         val optionName = "redirectOutputToLogcat"
@@ -217,7 +214,24 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
+    override fun definition() = ModuleDefinition {
+        Name("RNNodeJsMobile")
+
+        // Expose the methods to React Native
+        Function("startNodeWithScript") { script: String, options: ReadableMap? ->
+            startNodeWithScript(script, options)
+        }
+        Function("startNodeProject") { mainFileName: String, options: ReadableMap? ->
+            startNodeProject(mainFileName, options)
+        }
+        Function("startNodeProjectWithArgs") { input: String, options: ReadableMap? ->
+            startNodeProjectWithArgs(input, options)
+        }
+        Function("sendMessage") { channel: String, msg: String ->
+            sendMessage(channel, msg)
+        }
+    }
+
     fun startNodeWithScript(script: String, options: ReadableMap?) {
         // A New module instance may have been created due to hot reload.
         instance = this
@@ -237,7 +251,6 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
     fun startNodeProject(mainFileName: String, options: ReadableMap?) {
         // A New module instance may have been created due to hot reload.
         instance = this
@@ -257,7 +270,6 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
     fun startNodeProjectWithArgs(input: String, options: ReadableMap?) {
         // A New module instance may have been created due to hot reload.
         instance = this
@@ -289,7 +301,6 @@ class RNNodeJsMobileModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
     fun sendMessage(channel: String, msg: String) {
         sendMessageToNodeChannel(channel, msg)
     }
