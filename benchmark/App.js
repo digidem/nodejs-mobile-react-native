@@ -5,8 +5,10 @@ import nodejs from "nodejs-mobile-react-native";
 import { faker } from "@faker-js/faker";
 
 const MSG_COUNT = 1000;
+const fixtureStart = Date.now();
 faker.seed("nodejs-mobile-test-messages");
 const MESSAGE_FIXTURES = Array.from({ length: MSG_COUNT }, createRandomUser);
+const fixtureTime = Date.now() - fixtureStart;
 
 export default function App() {
   const [output, setOutput] = React.useState("");
@@ -35,6 +37,7 @@ export default function App() {
       },
       this
     );
+    timerRef.current = Date.now();
     for (const msg of MESSAGE_FIXTURES) {
       nodejs.channel.send(msg);
     }
@@ -47,6 +50,7 @@ export default function App() {
 
   return (
     <View style={styles.container}>
+      <Text>Fixture generation took {fixtureTime} ms</Text>
       <Text>{output}</Text>
       <Button
         title="Message Node"

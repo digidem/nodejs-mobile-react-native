@@ -14,7 +14,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.janeasystems.rnnodejsmobile.example"
+      "bundleIdentifier": "com.nodejsmobile.reactnative.example"
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +22,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.janeasystems.rn_nodejs_mobile.example"
+      "package": "com.nodejsmobile.reactnative.example"
     },
     "web": {
       "favicon": "./assets/favicon.png"

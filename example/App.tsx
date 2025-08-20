@@ -1,40 +1,43 @@
-import { useEvent } from 'expo';
-import RNNodeJsMobile, { RNNodeJsMobileView } from 'nodejs-mobile-react-native';
-import { Button, SafeAreaView, ScrollView, Text, View } from 'react-native';
+import React from "react";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+
+import nodejs from "nodejs-mobile-react-native";
+
+import { useEvent } from "expo";
+import { Button, ScrollView, Text, View } from "react-native";
+
+let count = 0;
+
+nodejs.start("main.js");
+nodejs.channel.addListener("message", (message: string) => {
+  console.log("Received message from NodeJS:", message);
+});
 
 export default function App() {
-  const onChangePayload = useEvent(RNNodeJsMobile, 'onChange');
+  const message = useEvent(nodejs.channel, "message");
 
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView style={styles.container}>
-        <Text style={styles.header}>Module API Example</Text>
-        <Group name="Constants">
-          <Text>{RNNodeJsMobile.PI}</Text>
-        </Group>
-        <Group name="Functions">
-          <Text>{RNNodeJsMobile.hello()}</Text>
-        </Group>
-        <Group name="Async functions">
-          <Button
-            title="Set value"
-            onPress={async () => {
-              await RNNodeJsMobile.setValueAsync('Hello from JS!');
-            }}
-          />
-        </Group>
-        <Group name="Events">
-          <Text>{onChangePayload?.value}</Text>
-        </Group>
-        <Group name="Views">
-          <RNNodeJsMobileView
-            url="https://www.example.com"
-            onLoad={({ nativeEvent: { url } }) => console.log(`Loaded: ${url}`)}
-            style={styles.view}
-          />
-        </Group>
-      </ScrollView>
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <ScrollView style={styles.container}>
+          <Text style={styles.header}>NodeJS Mobile Example</Text>
+          <Group name="Constants">
+            <Text>Placeholder</Text>
+          </Group>
+          <Group name="Send Message">
+            <Button
+              title="Message NodeJS"
+              onPress={async () => {
+                nodejs.channel.send(`Hello from React Native! (${++count})`);
+              }}
+            />
+          </Group>
+          <Group name="Received Message">
+            <Text>{message}</Text>
+          </Group>
+        </ScrollView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -58,13 +61,13 @@ const styles = {
   },
   group: {
     margin: 20,
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     borderRadius: 10,
     padding: 20,
   },
   container: {
     flex: 1,
-    backgroundColor: '#eee',
+    backgroundColor: "#eee",
   },
   view: {
     flex: 1,

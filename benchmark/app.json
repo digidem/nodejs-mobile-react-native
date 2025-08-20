@@ -9,6 +9,6 @@
     "ios": {
       "bundleIdentifier": "com.nodejsmobilereactnative.benchmark"
     },
-    "newArchEnabled": false
+    "newArchEnabled": true
   }
 }

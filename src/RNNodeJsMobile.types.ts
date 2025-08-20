@@ -1,19 +1,14 @@
-import type { StyleProp, ViewStyle } from 'react-native';
+export type NodeJsMessageEventPayload = {
+  channelName: string;
+  message: string;
+};
 
-export type OnLoadEventPayload = {
-  url: string;
+export type NodeJsOptions = {
+  redirectOutputToLogcat?: boolean;
 };
 
 export type RNNodeJsMobileModuleEvents = {
-  onChange: (params: ChangeEventPayload) => void;
-};
-
-export type ChangeEventPayload = {
-  value: string;
-};
-
-export type RNNodeJsMobileViewProps = {
-  url: string;
-  onLoad: (event: { nativeEvent: OnLoadEventPayload }) => void;
-  style?: StyleProp<ViewStyle>;
+  "nodejs-mobile-react-native-message": (
+    params: NodeJsMessageEventPayload
+  ) => void;
 };
