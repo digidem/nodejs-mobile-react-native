@@ -1,47 +1,68 @@
 package com.nodejsmobile.reactnative
 
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
-import com.facebook.react.modules.core.RCTNativeAppEventEmitter
-import com.facebook.react.module.annotations.ReactModule
-import com.facebook.react.bridge.WritableMap
-import com.facebook.react.bridge.ReadableMap
-import com.facebook.react.bridge.ReadableType
-import com.facebook.react.bridge.Arguments
-import com.facebook.react.bridge.LifecycleEventListener
 import android.util.Log
 import android.content.Context
 import android.content.res.AssetManager
-import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
-import android.content.SharedPreferences
 import android.system.Os
 import android.system.ErrnoException
-import java.io.*
-import java.util.*
-import java.util.concurrent.Semaphore
+import java.io.File
+import java.io.IOException
+import java.io.FileNotFoundException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.exception.Exceptions
+import expo.modules.kotlin.records.Record
+import expo.modules.kotlin.records.Field
+
+class NodeJsOptions : Record {
+    @Field
+    val redirectOutputToLogcat: Boolean = true
+}
 
 class RNNodeJsMobileModule : Module() {
     private val reactContext: Context
         get() = appContext.reactContext ?: throw Exceptions.ReactContextLost()
-    private  var trashDirPath: String
-    private  var filesDirPath: String
-    private  var nodeJsProjectPath: String
-    private  var builtinModulesPath: String
-    private  var nativeAssetsPath: String
+
+    private val filesDir: File
+        get() = reactContext.filesDir
+
+    private val trashDir: File
+        get() = File(filesDir, TRASH_DIR)
+
+    // The directories where we expect the node project assets to be at runtime.
+    private val nodeJsProjectDir: File
+        get() = File(filesDir, NODEJS_PROJECT_DIR)
+
+    private val builtinModulesDir: File
+        get() = File(filesDir, NODEJS_BUILTIN_MODULES)
+
+    private val nativeAssetsPath: String
+        get() = "$BUILTIN_NATIVE_ASSETS_PREFIX${getCurrentABIName()}"
     private var lastUpdateTime: Long = 1
     private var previousLastUpdateTime: Long = 0
-    private val initSemaphore = Semaphore(1)
-    private var initCompleted = false
+    private val moduleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val fileCopySemaphore = Semaphore(8) // Limit concurrent file operations
+    private val initCompletionDeferred = CompletableDeferred<Unit>()
 
-    private lateinit var assetManager: AssetManager
+    private val assetManager: AssetManager
+        get() = reactContext.assets
 
     companion object {
+        const val EVENT_NAME = "nodejs-mobile-react-native-message"
+
         private const val TAG = "NODEJS-RN"
         private const val NODEJS_PROJECT_DIR = "nodejs-project"
         private const val NODEJS_BUILTIN_MODULES = "nodejs-builtin_modules"
@@ -65,6 +86,7 @@ class RNNodeJsMobileModule : Module() {
             System.loadLibrary("node")
         }
 
+        @JvmStatic
         fun sendMessageToApplication(channelName: String, msg: String) {
             if (channelName == SYSTEM_CHANNEL) {
                 // If it's a system channel call, handle it in the plugin native side.
@@ -84,147 +106,91 @@ class RNNodeJsMobileModule : Module() {
         // Called from JNI when node sends a message through the bridge.
         fun sendMessageBackToReact(channelName: String, msg: String) {
             instance?.let { moduleInstance ->
-                Thread {
-                    val params = Arguments.createMap().apply {
-                        putString("channelName", channelName)
-                        putString("message", msg)
-                    }
-                    moduleInstance.sendEvent("nodejs-mobile-react-native-message", params)
-                }.start()
-            }
-        }
-
-        // Recursively deletes a folder
-        private fun deleteFolderRecursively(file: File): Boolean {
-            return try {
-                var res = true
-                file.listFiles()?.forEach { childFile ->
-                    res = if (childFile.isDirectory) {
-                        res and deleteFolderRecursively(childFile)
-                    } else {
-                        res and childFile.delete()
-                    }
-                }
-                res and file.delete()
-            } catch (e: Exception) {
-                e.printStackTrace()
-                false
-            }
-        }
-
-        // Recursively copies contents of a folder in assets to a path
-        private fun copyAssetFolder(fromAssetPath: String, toPath: String) {
-            val files = assetManager.list(fromAssetPath) ?: return
-
-            if (files.isEmpty()) {
-                // If it's a file, it won't have any assets "inside" it.
-                copyAsset(fromAssetPath, toPath)
-            } else {
-                File(toPath).mkdirs()
-                files.forEach { file ->
-                    copyAssetFolder("$fromAssetPath/$file", "$toPath/$file")
+                moduleInstance.moduleScope.launch(Dispatchers.Main) {
+                    val params = mapOf(
+                        "channelName" to channelName,
+                        "message" to msg
+                    )
+                    moduleInstance.sendEvent(EVENT_NAME, params)
                 }
             }
         }
 
-        private fun copyAsset(fromAssetPath: String, toPath: String) {
-            var inputStream: InputStream? = null
-            var outputStream: OutputStream? = null
-            try {
-                inputStream = assetManager.open(fromAssetPath)
-                File(toPath).createNewFile()
-                outputStream = FileOutputStream(toPath)
-                copyFile(inputStream, outputStream)
-            } catch (e: IOException) {
-                e.printStackTrace()
-            } finally {
-                inputStream?.close()
-                outputStream?.flush()
-                outputStream?.close()
-            }
-        }
 
-        // Copy file from an input stream to an output stream
-        private fun copyFile(inputStream: InputStream, outputStream: OutputStream) {
-            val buffer = ByteArray(1024)
-            var read: Int
-            while (inputStream.read(buffer).also { read = it } != -1) {
-                outputStream.write(buffer, 0, read)
-            }
-        }
-    }
-
-    init {
-        this.reactContext.addLifecycleEventListener(this)
-        filesDirPath = this.reactContext.filesDir.absolutePath
-
-        // The paths where we expect the node project assets to be at runtime.
-        nodeJsProjectPath = "$filesDirPath/$NODEJS_PROJECT_DIR"
-        builtinModulesPath = "$filesDirPath/$NODEJS_BUILTIN_MODULES"
-        trashDirPath = "$filesDirPath/$TRASH_DIR"
-        nativeAssetsPath = "$BUILTIN_NATIVE_ASSETS_PREFIX${getCurrentABIName()}"
-
-        // Sets the TMPDIR environment to the cacheDir, to be used in Node as os.tmpdir
-        try {
-            Os.setenv("TMPDIR", this.reactContext.cacheDir.absolutePath, true)
-        } catch (e: ErrnoException) {
-            e.printStackTrace()
-        }
-
-        // Register the filesDir as the Node data dir.
-        registerNodeDataDirPath(filesDirPath)
-
-        asyncInit()
     }
 
     private fun asyncInit() {
-        if (wasAPKUpdated()) {
+        moduleScope.launch {
             try {
-                initSemaphore.acquire()
-                Thread {
-                    emptyTrash()
+                if (wasAPKUpdated()) {
+                    // Clear any existing trash before starting
+                    trashDir.deleteRecursively()
                     try {
                         copyNodeJsAssets()
-                        initCompleted = true
                     } catch (e: IOException) {
-                        throw RuntimeException("Node assets copy failed", e)
+                        initCompletionDeferred.completeExceptionally(RuntimeException("Node assets copy failed", e))
+                        return@launch
                     }
-                    initSemaphore.release()
-                    emptyTrash()
-                }.start()
-            } catch (ie: InterruptedException) {
-                initSemaphore.release()
-                ie.printStackTrace()
+                    // Clear trash after successful copy
+                    trashDir.deleteRecursively()
+                }
+                // Signal completion - whether we copied assets or not
+                initCompletionDeferred.complete(Unit)
+            } catch (e: Exception) {
+                initCompletionDeferred.completeExceptionally(e)
             }
-        } else {
-            initCompleted = true
         }
     }
 
-    // Extracts the option to redirect stdout and stderr to logcat
-    private fun extractRedirectOutputToLogcatOption(options: ReadableMap?): Boolean {
-        val optionName = "redirectOutputToLogcat"
-        return if (options?.hasKey(optionName) == true &&
-                   !options.isNull(optionName) &&
-                   options.getType(optionName) == ReadableType.Boolean) {
-            options.getBoolean(optionName)
-        } else {
-            // By default, we redirect the process' stdout and stderr to show in logcat
-            true
-        }
-    }
 
     override fun definition() = ModuleDefinition {
         Name("RNNodeJsMobile")
 
+        OnCreate {
+            // Sets the TMPDIR environment to the cacheDir, to be used in Node as os.tmpdir
+            try {
+                Os.setenv("TMPDIR", reactContext.cacheDir.absolutePath, true)
+            } catch (e: ErrnoException) {
+                e.printStackTrace()
+            }
+
+            // Register the filesDir as the Node data dir.
+            registerNodeDataDirPath(filesDir.absolutePath)
+
+            asyncInit()
+        }
+
+        OnActivityEntersBackground {
+            // When the activity goes to background, we send a message to node.
+            if (nodeIsReadyForAppEvents) {
+                sendMessage(SYSTEM_CHANNEL, "pause")
+            }
+        }
+
+        OnActivityEntersForeground {
+            // When the activity comes back to foreground, we send a message to node.
+            if (nodeIsReadyForAppEvents) {
+                sendMessage(SYSTEM_CHANNEL, "resume")
+            }
+        }
+
+        OnDestroy {
+            // Cancel all coroutines when the module is destroyed
+            moduleScope.cancel()
+        }
+
+        Constants("EVENT_NAME" to EVENT_NAME)
+
+        Events(EVENT_NAME)
+
         // Expose the methods to React Native
-        Function("startNodeWithScript") { script: String, options: ReadableMap? ->
+        Function("startNodeWithScript") { script: String, options: NodeJsOptions ->
             startNodeWithScript(script, options)
         }
-        Function("startNodeProject") { mainFileName: String, options: ReadableMap? ->
+        Function("startNodeProject") { mainFileName: String, options: NodeJsOptions ->
             startNodeProject(mainFileName, options)
         }
-        Function("startNodeProjectWithArgs") { input: String, options: ReadableMap? ->
+        Function("startNodeProjectWithArgs") { input: String, options: NodeJsOptions ->
             startNodeProjectWithArgs(input, options)
         }
         Function("sendMessage") { channel: String, msg: String ->
@@ -232,52 +198,52 @@ class RNNodeJsMobileModule : Module() {
         }
     }
 
-    fun startNodeWithScript(script: String, options: ReadableMap?) {
+    fun startNodeWithScript(script: String, options: NodeJsOptions) {
         // A New module instance may have been created due to hot reload.
         instance = this
         if (!startedNodeAlready) {
             startedNodeAlready = true
 
-            val redirectOutputToLogcat = extractRedirectOutputToLogcatOption(options)
+            val redirectOutputToLogcat = options.redirectOutputToLogcat
 
-            Thread {
+            moduleScope.launch {
                 waitForInit()
                 startNodeWithArguments(
                     arrayOf("node", "-e", script),
-                    "$nodeJsProjectPath:$builtinModulesPath",
+                    "${nodeJsProjectDir.absolutePath}:${builtinModulesDir.absolutePath}",
                     redirectOutputToLogcat
                 )
-            }.start()
+            }
         }
     }
 
-    fun startNodeProject(mainFileName: String, options: ReadableMap?) {
+    fun startNodeProject(mainFileName: String, options: NodeJsOptions) {
         // A New module instance may have been created due to hot reload.
         instance = this
         if (!startedNodeAlready) {
             startedNodeAlready = true
 
-            val redirectOutputToLogcat = extractRedirectOutputToLogcatOption(options)
+            val redirectOutputToLogcat = options.redirectOutputToLogcat
 
-            Thread {
+            moduleScope.launch {
                 waitForInit()
                 startNodeWithArguments(
-                    arrayOf("node", "$nodeJsProjectPath/$mainFileName"),
-                    "$nodeJsProjectPath:$builtinModulesPath",
+                    arrayOf("node", File(nodeJsProjectDir, mainFileName).absolutePath),
+                    "${nodeJsProjectDir.absolutePath}:${builtinModulesDir.absolutePath}",
                     redirectOutputToLogcat
                 )
-            }.start()
+            }
         }
     }
 
-    fun startNodeProjectWithArgs(input: String, options: ReadableMap?) {
+    fun startNodeProjectWithArgs(input: String, options: NodeJsOptions) {
         // A New module instance may have been created due to hot reload.
         instance = this
         if (!startedNodeAlready) {
             startedNodeAlready = true
 
             val args = input.split(" ").toMutableList()
-            val absoluteScriptPath = "$nodeJsProjectPath/${args[0]}"
+            val absoluteScriptPath = File(nodeJsProjectDir, args[0]).absolutePath
 
             // Remove script file name from arguments list
             args.removeAt(0)
@@ -288,16 +254,16 @@ class RNNodeJsMobileModule : Module() {
                 addAll(args)
             }
 
-            val redirectOutputToLogcat = extractRedirectOutputToLogcatOption(options)
+            val redirectOutputToLogcat = options.redirectOutputToLogcat
 
-            Thread {
+            moduleScope.launch {
                 waitForInit()
                 startNodeWithArguments(
                     command.toTypedArray(),
-                    "$nodeJsProjectPath:$builtinModulesPath",
+                    "${nodeJsProjectDir.absolutePath}:${builtinModulesDir.absolutePath}",
                     redirectOutputToLogcat
                 )
-            }.start()
+            }
         }
     }
 
@@ -305,28 +271,6 @@ class RNNodeJsMobileModule : Module() {
         sendMessageToNodeChannel(channel, msg)
     }
 
-    // Sends an event through the App Event Emitter.
-    private fun sendEvent(eventName: String, params: WritableMap?) {
-        reactContext
-            .getJSModule(RCTNativeAppEventEmitter::class.java)
-            .emit(eventName, params)
-    }
-
-    override fun onHostPause() {
-        if (nodeIsReadyForAppEvents) {
-            sendMessageToNodeChannel(SYSTEM_CHANNEL, "pause")
-        }
-    }
-
-    override fun onHostResume() {
-        if (nodeIsReadyForAppEvents) {
-            sendMessageToNodeChannel(SYSTEM_CHANNEL, "resume")
-        }
-    }
-
-    override fun onHostDestroy() {
-        // Activity `onDestroy`
-    }
 
     external fun registerNodeDataDirPath(dataDir: String)
     external fun getCurrentABIName(): String
@@ -337,19 +281,46 @@ class RNNodeJsMobileModule : Module() {
     ): Int
     external fun sendMessageToNodeChannel(channelName: String, msg: String)
 
-    private fun waitForInit() {
-        if (!initCompleted) {
-            try {
-                initSemaphore.acquire()
-                initSemaphore.release()
-            } catch (ie: InterruptedException) {
-                initSemaphore.release()
-                ie.printStackTrace()
+    // Recursively copies contents of a folder in assets to a path with parallel processing
+    private suspend fun copyAssetFolder(fromAssetPath: String, toDir: File): Unit = withContext(Dispatchers.IO) {
+        val files = assetManager.list(fromAssetPath) ?: return@withContext
+
+        if (files.isEmpty()) {
+            // If it's a file, it won't have any assets "inside" it.
+            fileCopySemaphore.withPermit {
+                copyAsset(fromAssetPath, toDir)
             }
+        } else {
+            toDir.mkdirs()
+            // Process subdirectories and files in parallel
+            val copyJobs = files.map { file ->
+                async {
+                    this@RNNodeJsMobileModule.copyAssetFolder("$fromAssetPath/$file", File(toDir, file))
+                }
+            }
+            copyJobs.awaitAll()
         }
     }
 
-    private fun wasAPKUpdated(): Boolean {
+    private suspend fun copyAsset(fromAssetPath: String, toFile: File) = withContext(Dispatchers.IO) {
+        try {
+            assetManager.open(fromAssetPath).use { inputStream ->
+                toFile.also { it.parentFile?.mkdirs() }.outputStream().buffered().use { outputStream ->
+                    inputStream.copyTo(outputStream, DEFAULT_BUFFER_SIZE)
+                }
+            }
+        } catch (e: IOException) {
+            e.printStackTrace()
+        }
+    }
+
+
+    private suspend fun waitForInit() {
+        // Wait for initialization to complete, handling both success and failure
+        initCompletionDeferred.await()
+    }
+
+    private suspend fun wasAPKUpdated(): Boolean = withContext(Dispatchers.IO) {
         val prefs = reactContext.getSharedPreferences(SHARED_PREFS, Context.MODE_PRIVATE)
         previousLastUpdateTime = prefs.getLong(LAST_UPDATED_TIME, 0)
 
@@ -359,10 +330,10 @@ class RNNodeJsMobileModule : Module() {
         } catch (e: PackageManager.NameNotFoundException) {
             e.printStackTrace()
         }
-        return lastUpdateTime != previousLastUpdateTime
+        return@withContext lastUpdateTime != previousLastUpdateTime
     }
 
-    private fun saveLastUpdateTime() {
+    private suspend fun saveLastUpdateTime() = withContext(Dispatchers.IO) {
         val prefs = reactContext.getSharedPreferences(SHARED_PREFS, Context.MODE_PRIVATE)
         prefs.edit().apply {
             putLong(LAST_UPDATED_TIME, lastUpdateTime)
@@ -370,31 +341,34 @@ class RNNodeJsMobileModule : Module() {
         }
     }
 
-    private fun emptyTrash() {
-        val trash = File(trashDirPath)
-        if (trash.exists()) {
-            deleteFolderRecursively(trash)
-        }
-    }
 
-    private fun copyNativeAssetsFrom(): Boolean {
-        return try {
-            // Load the additional asset folder and files lists
-            val nativeDirs = readFileFromAssets("$nativeAssetsPath/dir.list")
-            val nativeFiles = readFileFromAssets("$nativeAssetsPath/file.list")
+    private suspend fun copyNativeAssetsFrom(): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            // Load the additional asset folder and files lists in parallel
+            val nativeDirsDeferred = async { readFileFromAssets("$nativeAssetsPath/dir.list") }
+            val nativeFilesDeferred = async { readFileFromAssets("$nativeAssetsPath/file.list") }
+
+            val nativeDirs = nativeDirsDeferred.await()
+            val nativeFiles = nativeFilesDeferred.await()
 
             // Copy additional asset files to project working folder
             if (nativeFiles.isNotEmpty()) {
                 Log.v(TAG, "Building folder hierarchy for $nativeAssetsPath")
                 nativeDirs.forEach { dir ->
-                    File("$nodeJsProjectPath/$dir").mkdirs()
+                    File(nodeJsProjectDir, dir).mkdirs()
                 }
                 Log.v(TAG, "Copying assets using file list for $nativeAssetsPath")
-                nativeFiles.forEach { file ->
-                    val src = "$nativeAssetsPath/$file"
-                    val dest = "$nodeJsProjectPath/$file"
-                    copyAsset(src, dest)
+
+                // Copy files in parallel with limited concurrency
+                val copyJobs = nativeFiles.map { file ->
+                    async {
+                        fileCopySemaphore.withPermit {
+                            val src = "$nativeAssetsPath/$file"
+                            copyAsset(src, File(nodeJsProjectDir, file))
+                        }
+                    }
                 }
+                copyJobs.awaitAll()
             } else {
                 Log.v(TAG, "No assets to copy from $nativeAssetsPath")
             }
@@ -405,68 +379,76 @@ class RNNodeJsMobileModule : Module() {
         }
     }
 
-    private fun copyNodeJsAssets() {
-        assetManager = reactApplicationContext.assets
-
+    private suspend fun copyNodeJsAssets() = withContext(Dispatchers.IO) {
         // If a previous project folder is present, move it to the trash.
-        val nodeDirReference = File(nodeJsProjectPath)
-        if (nodeDirReference.exists()) {
-            val trash = File(trashDirPath)
-            nodeDirReference.renameTo(trash)
+        if (nodeJsProjectDir.exists()) {
+            nodeJsProjectDir.renameTo(trashDir)
         }
 
-        // Load the nodejs project's folder and file lists.
-        val dirs = readFileFromAssets("dir.list")
-        val files = readFileFromAssets("file.list")
+        // Load the nodejs project's folder and file lists in parallel
+        val dirsDeferred = async { readFileFromAssets("dir.list") }
+        val filesDeferred = async { readFileFromAssets("file.list") }
+
+        val dirs = dirsDeferred.await()
+        val files = filesDeferred.await()
 
         // Copy the nodejs project files to the application's data path.
         if (dirs.isNotEmpty() && files.isNotEmpty()) {
             Log.d(TAG, "Node assets copy using pre-built lists")
+
+            // Create directories first (sequential - they're dependencies)
             dirs.forEach { dir ->
-                File("$filesDirPath/$dir").mkdirs()
+                File(filesDir, dir).mkdirs()
             }
 
-            files.forEach { file ->
-                val src = file
-                val dest = "$filesDirPath/$file"
-                copyAsset(src, dest)
+            // Copy files in parallel with limited concurrency
+            val fileCopyJobs = files.map { file ->
+                async {
+                    fileCopySemaphore.withPermit {
+                        copyAsset(file, File(filesDir, file))
+                    }
+                }
             }
+            fileCopyJobs.awaitAll()
         } else {
             Log.d(TAG, "Node assets copy enumerating APK assets")
-            copyAssetFolder(NODEJS_PROJECT_DIR, nodeJsProjectPath)
+            copyAssetFolder(NODEJS_PROJECT_DIR, nodeJsProjectDir)
         }
 
-        copyNativeAssetsFrom()
-
-        // Do the builtin-modules copy too.
-        // If a previous built-in modules folder is present, delete it.
-        val modulesDirReference = File(builtinModulesPath)
-        if (modulesDirReference.exists()) {
-            deleteFolderRecursively(modulesDirReference)
+        // Run native assets and builtin modules copy in parallel
+        val nativeAssetsJob = async { copyNativeAssetsFrom() }
+        val builtinModulesJob = async {
+            // Do the builtin-modules copy too.
+            // Delete any previous built-in modules folder
+            builtinModulesDir.deleteRecursively()
+            // Copy the nodejs built-in modules to the application's data path.
+            copyAssetFolder("builtin_modules", builtinModulesDir)
         }
 
-        // Copy the nodejs built-in modules to the application's data path.
-        copyAssetFolder("builtin_modules", builtinModulesPath)
+        nativeAssetsJob.await()
+        builtinModulesJob.await()
 
         saveLastUpdateTime()
         Log.d(TAG, "Node assets copy completed successfully")
     }
 
-    private fun readFileFromAssets(filename: String): ArrayList<String> {
-        val lines = ArrayList<String>()
-        try {
-            BufferedReader(InputStreamReader(assetManager.open(filename))).use { reader ->
-                var line = reader.readLine()
-                while (line != null) {
-                    lines.add(line)
-                    line = reader.readLine()
+    private suspend fun readFileFromAssets(filename: String): List<String> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            assetManager.open(filename).use { inputStream ->
+                inputStream.bufferedReader().useLines { lines ->
+                    lines.toList()
                 }
             }
-        } catch (e: FileNotFoundException) {
+        } catch (_: FileNotFoundException) {
             Log.d(TAG, "File not found: $filename")
+            emptyList()
         } catch (e: IOException) {
             e.printStackTrace()
+            emptyList()
+        } catch (e: Exception) {
+            // Fallback for any other unexpected exceptions
+            Log.e(TAG, "Unexpected error reading file: $filename", e)
+            emptyList()
         }
-        return lines
     }
 }
