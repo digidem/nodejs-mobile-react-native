@@ -11,6 +11,10 @@
 // cache the environment variable for the thread running node to call into java
 JNIEnv* cacheEnvPointer=NULL;
 
+// cache JNI class and method references for performance
+static jclass cached_class = nullptr;
+static jmethodID cached_method = nullptr;
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_sendMessageToNodeChannel(
@@ -65,20 +69,14 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_registerNodeDataDirPath(
 #define APPNAME "RNBRIDGE"
 
 void rcv_message(const char* channel_name, const char* msg) {
-  JNIEnv *env=cacheEnvPointer;
-  if(!env) return;
-  jclass cls2 = env->FindClass("com/nodejsmobile/reactnative/RNNodeJsMobileModule");  // try to find the class
-  if(cls2 != nullptr) {
-    jmethodID m_sendMessage = env->GetStaticMethodID(cls2, "sendMessageToApplication", "(Ljava/lang/String;Ljava/lang/String;)V");  // find method
-    if(m_sendMessage != nullptr) {
-        jstring java_channel_name=env->NewStringUTF(channel_name);
-        jstring java_msg=env->NewStringUTF(msg);
-        env->CallStaticVoidMethod(cls2, m_sendMessage, java_channel_name, java_msg);                      // call method
-        env->DeleteLocalRef(java_channel_name);
-        env->DeleteLocalRef(java_msg);
-    }
-  }
-  env->DeleteLocalRef(cls2);
+  JNIEnv *env = cacheEnvPointer;
+  if (!env || !cached_class || !cached_method) return;
+  
+  jstring java_channel_name = env->NewStringUTF(channel_name);
+  jstring java_msg = env->NewStringUTF(msg);
+  env->CallStaticVoidMethod(cached_class, cached_method, java_channel_name, java_msg);
+  env->DeleteLocalRef(java_channel_name);
+  env->DeleteLocalRef(java_msg);
 }
 
 // Start threads to redirect stdout and stderr to logcat.
@@ -153,10 +151,16 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
     //argc
     jsize argument_count = env->GetArrayLength(arguments);
 
+    // Store references for proper cleanup
+    jobject* object_refs = new jobject[argument_count];
+    const char** string_refs = new const char*[argument_count];
+    
     //Compute byte size need for all arguments in contiguous memory.
     int c_arguments_size = 0;
     for (int i = 0; i < argument_count ; i++) {
-        c_arguments_size += strlen(env->GetStringUTFChars((jstring)env->GetObjectArrayElement(arguments, i), 0));
+        object_refs[i] = env->GetObjectArrayElement(arguments, i);
+        string_refs[i] = env->GetStringUTFChars((jstring)object_refs[i], 0);
+        c_arguments_size += strlen(string_refs[i]);
         c_arguments_size++; // for '\0'
     }
 
@@ -172,7 +176,7 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
     //Populate the args_buffer and argv.
     for (int i = 0; i < argument_count ; i++)
     {
-        const char* current_argument = env->GetStringUTFChars((jstring)env->GetObjectArrayElement(arguments, i), 0);
+        const char* current_argument = string_refs[i];
 
         //Copy current argument to its expected position in args_buffer
         strncpy(current_args_position, current_argument, strlen(current_argument));
@@ -188,6 +192,16 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
 
     cacheEnvPointer=env;
 
+    // Initialize cached JNI references for performance
+    if (!cached_class) {
+        jclass local_class = env->FindClass("com/nodejsmobile/reactnative/RNNodeJsMobileModule");
+        if (local_class) {
+            cached_class = (jclass)env->NewGlobalRef(local_class);
+            cached_method = env->GetStaticMethodID(cached_class, "sendMessageToApplication", "(Ljava/lang/String;Ljava/lang/String;)V");
+            env->DeleteLocalRef(local_class);
+        }
+    }
+
     //Start threads to show stdout and stderr in logcat.
     if (option_redirectOutputToLogcat) {
         if (start_redirecting_stdout_stderr()==-1) {
@@ -196,6 +210,23 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
     }
 
     //Start node, with argc and argv.
-    return jint(callintoNode(argument_count,argv));
+    jint result = jint(callintoNode(argument_count,argv));
 
+    // Cleanup memory to prevent leaks
+    for (int i = 0; i < argument_count; i++) {
+        env->ReleaseStringUTFChars((jstring)object_refs[i], string_refs[i]);
+        env->DeleteLocalRef(object_refs[i]);
+    }
+    delete[] object_refs;
+    delete[] string_refs;
+    free(args_buffer);
+
+    // Cleanup cached JNI references
+    if (cached_class) {
+        env->DeleteGlobalRef(cached_class);
+        cached_class = nullptr;
+        cached_method = nullptr;
+    }
+
+    return result;
 }
