@@ -4,14 +4,13 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <android/log.h>
+#include <chrono>
 
 #include "node.h"
 #include "rn-bridge.h"
 
-// cache the environment variable for the thread running node to call into java
-JNIEnv* cacheEnvPointer=NULL;
-
-// cache JNI class and method references for performance
+// cache JavaVM for thread attachment and JNI references for performance
+static JavaVM* cached_jvm = nullptr;
 static jclass cached_class = nullptr;
 static jmethodID cached_method = nullptr;
 
@@ -69,14 +68,71 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_registerNodeDataDirPath(
 #define APPNAME "RNBRIDGE"
 
 void rcv_message(const char* channel_name, const char* msg) {
-  JNIEnv *env = cacheEnvPointer;
-  if (!env || !cached_class || !cached_method) return;
+  auto start_time = std::chrono::high_resolution_clock::now();
+  
+  // Log thread information
+  pthread_t current_thread = pthread_self();
+  
+  if (!cached_jvm || !cached_class || !cached_method) {
+    __android_log_print(ANDROID_LOG_WARN, "RN_BRIDGE_PERF", "rcv_message: Invalid jvm/class/method pointers on thread %lu", (unsigned long)current_thread);
+    return;
+  }
+  
+  __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "rcv_message: Called on thread %lu", (unsigned long)current_thread);
+  
+  auto after_checks = std::chrono::high_resolution_clock::now();
+  
+  // Attach current thread to get valid JNIEnv
+  JNIEnv* env = nullptr;
+  bool attached = false;
+  jint attach_result = cached_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+  
+  if (attach_result == JNI_EDETACHED) {
+    // Thread is not attached, attach it
+    if (cached_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+      attached = true;
+      __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "Successfully attached thread %lu", (unsigned long)current_thread);
+    } else {
+      __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "Failed to attach thread %lu", (unsigned long)current_thread);
+      return;
+    }
+  } else if (attach_result != JNI_OK) {
+    __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "GetEnv failed on thread %lu", (unsigned long)current_thread);
+    return;
+  }
+  
+  auto after_thread_attach = std::chrono::high_resolution_clock::now();
   
   jstring java_channel_name = env->NewStringUTF(channel_name);
   jstring java_msg = env->NewStringUTF(msg);
+  
+  auto after_string_creation = std::chrono::high_resolution_clock::now();
+  
   env->CallStaticVoidMethod(cached_class, cached_method, java_channel_name, java_msg);
+  
+  auto after_jni_call = std::chrono::high_resolution_clock::now();
+  
   env->DeleteLocalRef(java_channel_name);
   env->DeleteLocalRef(java_msg);
+  
+  // Detach thread if we attached it (for native threads)
+  if (attached) {
+    cached_jvm->DetachCurrentThread();
+  }
+  
+  auto end_time = std::chrono::high_resolution_clock::now();
+  
+  // Log timing breakdown
+  auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+  auto checks_us = std::chrono::duration_cast<std::chrono::microseconds>(after_checks - start_time).count();
+  auto attach_us = std::chrono::duration_cast<std::chrono::microseconds>(after_thread_attach - after_checks).count();
+  auto strings_us = std::chrono::duration_cast<std::chrono::microseconds>(after_string_creation - after_thread_attach).count();
+  auto jni_call_us = std::chrono::duration_cast<std::chrono::microseconds>(after_jni_call - after_string_creation).count();
+  auto cleanup_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - after_jni_call).count();
+  
+  __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", 
+    "rcv_message timing: total=%ldμs checks=%ldμs attach=%ldμs strings=%ldμs jni_call=%ldμs cleanup=%ldμs attached=%s", 
+    total_us, checks_us, attach_us, strings_us, jni_call_us, cleanup_us, attached ? "true" : "false");
 }
 
 // Start threads to redirect stdout and stderr to logcat.
@@ -190,7 +246,17 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
 
     rn_register_bridge_cb(&rcv_message);
 
-    cacheEnvPointer=env;
+    // Store JavaVM for thread attachment
+    if (!cached_jvm) {
+        if (env->GetJavaVM(&cached_jvm) != JNI_OK) {
+            __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "Failed to get JavaVM");
+            return jint(-1);
+        }
+    }
+    
+    // Log thread information for debugging
+    pthread_t current_thread = pthread_self();
+    __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "startNodeWithArguments thread: %lu", (unsigned long)current_thread);
 
     // Initialize cached JNI references for performance
     if (!cached_class) {
@@ -199,6 +265,9 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
             cached_class = (jclass)env->NewGlobalRef(local_class);
             cached_method = env->GetStaticMethodID(cached_class, "sendMessageToApplication", "(Ljava/lang/String;Ljava/lang/String;)V");
             env->DeleteLocalRef(local_class);
+            __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "Cached JNI references initialized on thread: %lu", (unsigned long)current_thread);
+        } else {
+            __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "Failed to find RNNodeJsMobileModule class");
         }
     }
 
@@ -227,6 +296,7 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_startNodeWithArguments(
         cached_class = nullptr;
         cached_method = nullptr;
     }
+    cached_jvm = nullptr;
 
     return result;
 }
