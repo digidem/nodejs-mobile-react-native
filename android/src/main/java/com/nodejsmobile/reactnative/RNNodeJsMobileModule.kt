@@ -20,9 +20,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.MainCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import java.util.concurrent.Executors
+import kotlinx.coroutines.asCoroutineDispatcher
+
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -33,12 +34,6 @@ import expo.modules.kotlin.records.Field
 class NodeJsOptions : Record {
     @Field
     val redirectOutputToLogcat: Boolean = true
-
-    @Field
-    val enableMessageBatching: Boolean = true // Test immediate mode first
-
-    @Field
-    val batchDelayMs: Long = 16 // One frame at 60fps
 }
 
 class RNNodeJsMobileModule : Module() {
@@ -66,14 +61,26 @@ class RNNodeJsMobileModule : Module() {
     private val fileCopySemaphore = Semaphore(8) // Limit concurrent file operations
     private val initCompletionDeferred = CompletableDeferred<Unit>()
 
-    // Message batching system
-    private val messageQueue = mutableListOf<Triple<String, String, Long>>()
-    private var flushJob: Job? = null
-    private var enableBatching = true
-    private var batchDelay = 16L
+    // Dedicated thread for Node.js events - ensures order and keeps off main thread
+    private val nodeEventDispatcher = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "NodeJS-Event-Dispatcher").apply {
+            priority = Thread.MAX_PRIORITY // High priority for low latency
+        }
+    }.asCoroutineDispatcher()
+
+    private val nodeEventScope = CoroutineScope(SupervisorJob() + nodeEventDispatcher)
+
+    // Channel for lock-free message passing from Node.js thread to event dispatcher
+    private val messageChannel = Channel<MessageData>(Channel.UNLIMITED)
 
     private val assetManager: AssetManager
         get() = reactContext.assets
+
+    private data class MessageData(
+        val channelName: String,
+        val message: String,
+        val timestamp: Long
+    )
 
     companion object {
         const val EVENT_NAME = "nodejs-mobile-react-native-message"
@@ -104,19 +111,14 @@ class RNNodeJsMobileModule : Module() {
         @JvmStatic
         fun sendMessageToApplication(channelName: String, msg: String) {
             val startTime = System.nanoTime()
-            Log.i("RN_BRIDGE_PERF", "sendMessageToApplication start: channel=$channelName")
 
             if (channelName == SYSTEM_CHANNEL) {
-                // If it's a system channel call, handle it in the plugin native side.
                 handleAppChannelMessage(msg)
-                val endTime = System.nanoTime()
-                Log.i("RN_BRIDGE_PERF", "sendMessageToApplication system end: ${(endTime - startTime) / 1000}μs")
+                Log.d("RN_BRIDGE_PERF", "System message handled: ${(System.nanoTime() - startTime) / 1000}μs")
             } else {
-                // Otherwise, send it to React Native.
-                val beforeReact = System.nanoTime()
-                sendMessageBackToReact(channelName, msg)
-                val endTime = System.nanoTime()
-                Log.i("RN_BRIDGE_PERF", "sendMessageToApplication react: dispatch=${(beforeReact - startTime) / 1000}μs total=${(endTime - startTime) / 1000}μs")
+                // Direct dispatch to React Native - no main thread involved
+                instance?.dispatchMessage(channelName, msg, startTime)
+                    ?: Log.w(TAG, "Module instance is null, message dropped")
             }
         }
 
@@ -125,29 +127,6 @@ class RNNodeJsMobileModule : Module() {
                 nodeIsReadyForAppEvents = true
             }
         }
-
-        // Called from JNI when node sends a message through the bridge.
-        fun sendMessageBackToReact(channelName: String, msg: String) {
-            val startTime = System.nanoTime()
-            Log.i("RN_BRIDGE_PERF", "sendMessageBackToReact called: channel=$channelName")
-
-            instance?.let { moduleInstance ->
-                val beforeLaunch = System.nanoTime()
-                Log.i("RN_BRIDGE_PERF", "sendMessageBackToReact: instanceLookup=${(beforeLaunch - startTime) / 1000}μs batching=${moduleInstance.enableBatching}")
-
-                if (moduleInstance.enableBatching) {
-                    Log.i("RN_BRIDGE_PERF", "Using batching mode")
-                    moduleInstance.queueMessage(channelName, msg, startTime)
-                } else {
-                    Log.i("RN_BRIDGE_PERF", "Using immediate mode")
-                    moduleInstance.sendMessageImmediately(channelName, msg, startTime, beforeLaunch)
-                }
-            } ?: run {
-                Log.w("RN_BRIDGE_PERF", "sendMessageBackToReact: instance is null!")
-            }
-        }
-
-
     }
 
     private fun asyncInit() {
@@ -188,6 +167,9 @@ class RNNodeJsMobileModule : Module() {
             // Register the filesDir as the Node data dir.
             registerNodeDataDirPath(filesDir.absolutePath)
 
+            // Start message processor on dedicated thread
+            startMessageProcessor()
+
             asyncInit()
         }
 
@@ -208,6 +190,9 @@ class RNNodeJsMobileModule : Module() {
         OnDestroy {
             // Cancel all coroutines when the module is destroyed
             moduleScope.cancel()
+            messageChannel.cancel()
+            nodeEventScope.cancel()
+            nodeEventDispatcher.close()
         }
 
         Constants("EVENT_NAME" to EVENT_NAME)
@@ -229,14 +214,65 @@ class RNNodeJsMobileModule : Module() {
         }
     }
 
+    // Called from JNI thread - dispatches message off main thread
+    private fun dispatchMessage(channelName: String, msg: String, startTime: Long) {
+        val enqueuedTime = System.nanoTime()
+
+        // Try to send without blocking - should always succeed with UNLIMITED capacity
+        val offered = messageChannel.trySend(
+            MessageData(channelName, msg, startTime)
+        ).isSuccess
+
+        if (!offered) {
+            // Fallback - shouldn't happen with unlimited channel
+            Log.w(TAG, "Message channel full, using coroutine dispatch")
+            nodeEventScope.launch {
+                messageChannel.send(MessageData(channelName, msg, startTime))
+            }
+        }
+
+        Log.d("RN_BRIDGE_PERF",
+            "Message dispatched: enqueue=${(System.nanoTime() - enqueuedTime) / 1000}μs thread=${Thread.currentThread().name}")
+    }
+
+    // Message processor running on dedicated thread
+    private fun startMessageProcessor() {
+        nodeEventScope.launch {
+            Log.i(TAG, "Message processor started on thread: ${Thread.currentThread().name}")
+
+            for (msg in messageChannel) {
+                processMessage(msg)
+            }
+
+            Log.i(TAG, "Message processor stopped")
+        }
+    }
+
+    private fun processMessage(data: MessageData) {
+        val processStart = System.nanoTime()
+
+        try {
+            // sendEvent is thread-safe and handles JS thread switching internally
+            val params = mapOf(
+                "channelName" to data.channelName,
+                "message" to data.message
+            )
+
+            sendEvent(EVENT_NAME, params)
+
+            val totalLatency = System.nanoTime() - data.timestamp
+            val processTime = System.nanoTime() - processStart
+
+            Log.d("RN_BRIDGE_PERF",
+                "Message sent: process=${processTime / 1000}μs latency=${totalLatency / 1000}μs")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending event: ${e.message}", e)
+        }
+    }
+
     fun startNodeWithScript(script: String, options: NodeJsOptions) {
         // A New module instance may have been created due to hot reload.
         instance = this
-
-        // Configure batching settings
-        enableBatching = options.enableMessageBatching
-        batchDelay = options.batchDelayMs
-        Log.i("RN_BRIDGE_PERF", "Message batching configured: enabled=$enableBatching delay=${batchDelay}ms")
 
         if (!startedNodeAlready) {
             startedNodeAlready = true
@@ -258,11 +294,6 @@ class RNNodeJsMobileModule : Module() {
         // A New module instance may have been created due to hot reload.
         instance = this
 
-        // Configure batching settings
-        enableBatching = options.enableMessageBatching
-        batchDelay = options.batchDelayMs
-        Log.i("RN_BRIDGE_PERF", "Message batching configured: enabled=$enableBatching delay=${batchDelay}ms")
-
         if (!startedNodeAlready) {
             startedNodeAlready = true
 
@@ -282,11 +313,6 @@ class RNNodeJsMobileModule : Module() {
     fun startNodeProjectWithArgs(input: String, options: NodeJsOptions) {
         // A New module instance may have been created due to hot reload.
         instance = this
-
-        // Configure batching settings
-        enableBatching = options.enableMessageBatching
-        batchDelay = options.batchDelayMs
-        Log.i("RN_BRIDGE_PERF", "Message batching configured: enabled=$enableBatching delay=${batchDelay}ms")
 
         if (!startedNodeAlready) {
             startedNodeAlready = true
@@ -318,86 +344,6 @@ class RNNodeJsMobileModule : Module() {
 
     fun sendMessage(channel: String, msg: String) {
         sendMessageToNodeChannel(channel, msg)
-    }
-
-    // Message batching implementation
-    private fun queueMessage(channelName: String, msg: String, startTime: Long) {
-        Log.i("RN_BRIDGE_PERF", "queueMessage called: channel=$channelName")
-
-        synchronized(messageQueue) {
-            messageQueue.add(Triple(channelName, msg, startTime))
-            Log.i("RN_BRIDGE_PERF", "Message queued: queue_size=${messageQueue.size}")
-        }
-
-        // Cancel existing flush job and schedule new one
-        flushJob?.cancel()
-        Log.i("RN_BRIDGE_PERF", "Scheduling flush job with delay=${batchDelay}ms")
-
-        flushJob = moduleScope.launch(Dispatchers.IO) {
-            Log.i("RN_BRIDGE_PERF", "Flush job started, delaying for ${batchDelay}ms")
-            // Delay on IO thread to avoid blocking UI
-            delay(batchDelay)
-            Log.i("RN_BRIDGE_PERF", "Delay completed, calling flushMessages")
-            // Then switch to Main thread only for the actual event dispatch
-            flushMessages()
-        }
-    }
-
-    private fun sendMessageImmediately(channelName: String, msg: String, startTime: Long, beforeLaunch: Long) {
-        moduleScope.launch(Dispatchers.Main.immediate) {
-            val afterDispatch = System.nanoTime()
-            Log.i("RN_BRIDGE_PERF", "sendMessageImmediately: dispatchToMain=${(afterDispatch - beforeLaunch) / 1000}μs")
-
-            val params = mapOf(
-                "channelName" to channelName,
-                "message" to msg
-            )
-            val beforeSendEvent = System.nanoTime()
-            sendEvent(EVENT_NAME, params)
-            val endTime = System.nanoTime()
-
-            Log.i("RN_BRIDGE_PERF", "sendMessageImmediately: sendEvent=${(endTime - beforeSendEvent) / 1000}μs total=${(endTime - startTime) / 1000}μs")
-        }
-    }
-
-    private suspend fun flushMessages() {
-        Log.i("RN_BRIDGE_PERF", "flushMessages called")
-
-        val messagesToFlush = synchronized(messageQueue) {
-            if (messageQueue.isEmpty()) {
-                Log.i("RN_BRIDGE_PERF", "Message queue is empty, nothing to flush")
-                return
-            }
-            val copy = messageQueue.map { it }
-            messageQueue.clear()
-            Log.i("RN_BRIDGE_PERF", "Copied ${copy.size} messages from queue")
-            copy
-        }
-
-        val flushStartTime = System.nanoTime()
-        Log.i("RN_BRIDGE_PERF", "Flushing ${messagesToFlush.size} batched messages")
-
-        // Switch to Main thread for sendEvent
-        withContext(Dispatchers.Main.immediate) {
-            Log.i("RN_BRIDGE_PERF", "Switched to Main thread, sending ${messagesToFlush.size} individual events")
-
-            // Send each message individually to maintain backward compatibility
-            var totalSendEventTime = 0L
-            messagesToFlush.forEach { (channel, msg, _) ->
-                val params = mapOf(
-                    "channelName" to channel,
-                    "message" to msg
-                )
-
-                val beforeSendEvent = System.nanoTime()
-                sendEvent(EVENT_NAME, params)
-                val endTime = System.nanoTime()
-                totalSendEventTime += (endTime - beforeSendEvent)
-            }
-
-            val oldestMessageTime = messagesToFlush.minOfOrNull { it.third } ?: flushStartTime
-            Log.i("RN_BRIDGE_PERF", "Batch flushed: count=${messagesToFlush.size} sendEvent=${totalSendEventTime / 1000}μs total_latency=${(System.nanoTime() - oldestMessageTime) / 1000}μs")
-        }
     }
 
     external fun registerNodeDataDirPath(dataDir: String)
