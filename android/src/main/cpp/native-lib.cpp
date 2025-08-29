@@ -14,6 +14,15 @@ static JavaVM* cached_jvm = nullptr;
 static jclass cached_class = nullptr;
 static jmethodID cached_method = nullptr;
 
+// Thread-local storage for JNIEnv to avoid repeated attachment overhead
+static thread_local JNIEnv* tls_env = nullptr;
+static thread_local bool tls_attached = false;
+
+// Memory usage monitoring and safety limits
+static std::atomic<int> attached_thread_count{0};
+static std::atomic<int> peak_attached_threads{0};
+static constexpr int MAX_ATTACHED_THREADS = 32;  // Safety limit to prevent memory exhaustion
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_sendMessageToNodeChannel(
@@ -67,58 +76,126 @@ Java_com_nodejsmobile_reactnative_RNNodeJsMobileModule_registerNodeDataDirPath(
 
 #define APPNAME "RNBRIDGE"
 
+// Fast path JNI environment getter using thread-local storage
+static inline JNIEnv* get_jni_env() {
+  // Check thread-local cache first
+  if (tls_env) {
+    return tls_env;
+  }
+  
+  if (!cached_jvm) {
+    return nullptr;
+  }
+  
+  JNIEnv* env = nullptr;
+  jint result = cached_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+  
+  if (result == JNI_OK) {
+    // Thread already attached, cache the env
+    tls_env = env;
+    tls_attached = false;  // We didn't attach it
+    return env;
+  }
+  
+  if (result == JNI_EDETACHED) {
+    // Safety check: prevent excessive thread attachment
+    int current_count = attached_thread_count.load();
+    if (current_count >= MAX_ATTACHED_THREADS) {
+      __android_log_print(ANDROID_LOG_WARN, "RN_BRIDGE_PERF", 
+        "Thread attachment limit reached (%d). Refusing to attach thread %lu", 
+        MAX_ATTACHED_THREADS, (unsigned long)pthread_self());
+      return nullptr;
+    }
+    
+    // Need to attach thread
+    if (cached_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+      tls_env = env;
+      tls_attached = true;  // We attached it, so we should detach on thread exit
+      
+      // Track memory usage
+      current_count = attached_thread_count.fetch_add(1) + 1;
+      int current_peak = peak_attached_threads.load();
+      while (current_count > current_peak && 
+             !peak_attached_threads.compare_exchange_weak(current_peak, current_count)) {
+        // CAS retry loop
+      }
+      
+      __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", 
+        "Thread attached: %lu, total=%d, peak=%d", 
+        (unsigned long)pthread_self(), current_count, peak_attached_threads.load());
+      
+      // Warn if approaching limit
+      if (current_count > MAX_ATTACHED_THREADS * 0.8) {
+        __android_log_print(ANDROID_LOG_WARN, "RN_BRIDGE_PERF", 
+          "High thread attachment count: %d/%d. Memory usage may be excessive.", 
+          current_count, MAX_ATTACHED_THREADS);
+      }
+      
+      return env;
+    }
+  }
+  
+  return nullptr;
+}
+
+// Thread cleanup callback to detach threads we attached
+static void thread_cleanup_callback(void* arg) {
+  if (tls_attached && cached_jvm) {
+    cached_jvm->DetachCurrentThread();
+    int remaining = attached_thread_count.fetch_sub(1) - 1;
+    __android_log_print(ANDROID_LOG_DEBUG, "RN_BRIDGE_PERF", 
+      "Thread detached: %lu, remaining=%d, peak=%d", 
+      (unsigned long)pthread_self(), remaining, peak_attached_threads.load());
+  }
+  tls_env = nullptr;
+  tls_attached = false;
+}
+
+// Setup thread cleanup for proper detachment
+static pthread_once_t cleanup_key_once = PTHREAD_ONCE_INIT;
+static pthread_key_t cleanup_key;
+
+static void make_cleanup_key() {
+  pthread_key_create(&cleanup_key, thread_cleanup_callback);
+}
+
 void rcv_message(const char* channel_name, const char* msg) {
   auto start_time = std::chrono::high_resolution_clock::now();
   
-  // Log thread information
-  pthread_t current_thread = pthread_self();
-  
-  if (!cached_jvm || !cached_class || !cached_method) {
-    __android_log_print(ANDROID_LOG_WARN, "RN_BRIDGE_PERF", "rcv_message: Invalid jvm/class/method pointers on thread %lu", (unsigned long)current_thread);
+  if (!cached_class || !cached_method) {
+    __android_log_print(ANDROID_LOG_WARN, "RN_BRIDGE_PERF", "rcv_message: Invalid class/method pointers");
     return;
   }
   
-  __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "rcv_message: Called on thread %lu", (unsigned long)current_thread);
+  // Setup thread cleanup on first use
+  pthread_once(&cleanup_key_once, make_cleanup_key);
+  pthread_setspecific(cleanup_key, (void*)1);  // Mark thread for cleanup
   
   auto after_checks = std::chrono::high_resolution_clock::now();
   
-  // Attach current thread to get valid JNIEnv
-  JNIEnv* env = nullptr;
-  bool attached = false;
-  jint attach_result = cached_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
-  
-  if (attach_result == JNI_EDETACHED) {
-    // Thread is not attached, attach it
-    if (cached_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
-      attached = true;
-      __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", "Successfully attached thread %lu", (unsigned long)current_thread);
-    } else {
-      __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "Failed to attach thread %lu", (unsigned long)current_thread);
-      return;
-    }
-  } else if (attach_result != JNI_OK) {
-    __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "GetEnv failed on thread %lu", (unsigned long)current_thread);
+  // Fast JNI environment access
+  JNIEnv* env = get_jni_env();
+  if (!env) {
+    __android_log_print(ANDROID_LOG_ERROR, "RN_BRIDGE_PERF", "Failed to get JNIEnv");
     return;
   }
   
   auto after_thread_attach = std::chrono::high_resolution_clock::now();
   
+  // Create Java strings
   jstring java_channel_name = env->NewStringUTF(channel_name);
   jstring java_msg = env->NewStringUTF(msg);
   
   auto after_string_creation = std::chrono::high_resolution_clock::now();
   
+  // Make the call
   env->CallStaticVoidMethod(cached_class, cached_method, java_channel_name, java_msg);
   
   auto after_jni_call = std::chrono::high_resolution_clock::now();
   
+  // Cleanup local references
   env->DeleteLocalRef(java_channel_name);
   env->DeleteLocalRef(java_msg);
-  
-  // Detach thread if we attached it (for native threads)
-  if (attached) {
-    cached_jvm->DetachCurrentThread();
-  }
   
   auto end_time = std::chrono::high_resolution_clock::now();
   
@@ -130,9 +207,10 @@ void rcv_message(const char* channel_name, const char* msg) {
   auto jni_call_us = std::chrono::duration_cast<std::chrono::microseconds>(after_jni_call - after_string_creation).count();
   auto cleanup_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - after_jni_call).count();
   
-  __android_log_print(ANDROID_LOG_INFO, "RN_BRIDGE_PERF", 
-    "rcv_message timing: total=%ldμs checks=%ldμs attach=%ldμs strings=%ldμs jni_call=%ldμs cleanup=%ldμs attached=%s", 
-    total_us, checks_us, attach_us, strings_us, jni_call_us, cleanup_us, attached ? "true" : "false");
+  __android_log_print(ANDROID_LOG_DEBUG, "RN_BRIDGE_PERF", 
+    "rcv_message: total=%ldμs checks=%ldμs attach=%ldμs strings=%ldμs call=%ldμs cleanup=%ldμs tls_hit=%s", 
+    total_us, checks_us, attach_us, strings_us, jni_call_us, cleanup_us, 
+    (attach_us < 5) ? "true" : "false");  // attach_us < 5μs indicates TLS cache hit
 }
 
 // Start threads to redirect stdout and stderr to logcat.
