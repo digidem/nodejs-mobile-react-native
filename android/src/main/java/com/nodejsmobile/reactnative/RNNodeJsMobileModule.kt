@@ -258,13 +258,15 @@ class RNNodeJsMobileModule : Module() {
                 "message" to data.message
             )
 
+val sendEventStart = System.nanoTime()
             sendEvent(EVENT_NAME, params)
+val sendEventTime = System.nanoTime() - sendEventStart
 
             val totalLatency = System.nanoTime() - data.timestamp
             val processTime = System.nanoTime() - processStart
 
             Log.d("RN_BRIDGE_PERF",
-                "Message sent: process=${processTime / 1000}μs latency=${totalLatency / 1000}μs")
+                "Message sent: sendEvent=${sendEventTime / 1000}μs process=${processTime / 1000}μs latency=${totalLatency / 1000}μs thread=${Thread.currentThread().name}")
         } catch (e: Exception) {
             Log.e(TAG, "Error sending event: ${e.message}", e)
         }
