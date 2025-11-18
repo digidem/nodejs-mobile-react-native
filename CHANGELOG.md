@@ -6,6 +6,7 @@
 </tr>
 <tr>
 <td>
+<a href="#18.20.4-0">18.20.4-0</a><br/>
 <a href="#18.20.4">18.20.4</a><br/>
 <a href="#18.17.8">18.17.8</a><br/>
 <a href="#18.17.7">18.17.7</a><br/>
@@ -55,8 +56,17 @@
 </tr>
 </table>
 
+
+<a id="18.20.4-0"></a>
+## 2025-11-19, Version 18.20.4-0 (Current)
+
+### Notable Changes
+
+* Update `nodejs-mobile` binary for Android to support 16kb page size.
+
+
 <a id="18.20.4"></a>
-## 2024-10-07, Version 18.20.4 (Current)
+## 2024-10-07, Version 18.20.4
 
 ### Notable Changes
 
