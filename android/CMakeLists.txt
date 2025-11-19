@@ -63,7 +63,7 @@ target_link_libraries( # Specifies the target library.
                        # included in the NDK.
                        ${log-lib} )
 
-# Enables 16 KB ELF alignment (NDK r26 or lower)
+# Enable 16 KB ELF alignment (NDK r26 or lower)
 # https://developer.android.com/guide/practices/page-sizes#compile-r26-lower
 
-target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-z,max-page-size=16384")
+target_link_options(nodejs-mobile-react-native-native-lib PRIVATE "-Wl,-z,max-page-size=16384")
