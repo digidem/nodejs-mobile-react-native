@@ -1,5 +1,5 @@
 {
-  "name": "nodejs-mobile-react-native",
+  "name": "@comapeo/nodejs-mobile-react-native",
   "version": "18.20.4-0",
   "description": "Node.js for Mobile Apps React Native plugin",
   "main": "index.js",
@@ -13,15 +13,14 @@
     "node.js",
     "nodejs-mobile"
   ],
-  "author": "janeasystems",
   "license": "MIT",
-  "homepage": "https://code.janeasystems.com/nodejs-mobile",
+  "homepage": "https://github.com/nodejs-mobile/nodejs-mobile",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nodejs-mobile/nodejs-mobile-react-native"
+    "url": "https://github.com/digidem/nodejs-mobile-react-native"
   },
   "bugs": {
-    "url": "https://github.com/nodejs-mobile/nodejs-mobile/issues"
+    "url": "https://github.com/digidem/nodejs-mobile-react-native/issues"
   },
   "peerDependencies": {
     "react-native": ">=0.60.0"

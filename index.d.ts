@@ -1,4 +1,4 @@
-declare module "nodejs-mobile-react-native" {
+declare module "@comapeo/nodejs-mobile-react-native" {
   export interface NodeJs {
     /**
      * Starts the nodejs-mobile runtime thread with a file inside the nodejs-project directory
