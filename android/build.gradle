@@ -62,6 +62,9 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags ""
+                // Enable 16 KB ELF alignment (NDK r27 and higher)
+                // https://developer.android.com/guide/practices/page-sizes#compile-r27
+                arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                 if(!_isCorrectSTLDefinedByApp) {
                     arguments "-DANDROID_STL=c++_shared"
                 }
