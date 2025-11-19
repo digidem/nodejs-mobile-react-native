@@ -3,7 +3,7 @@
 
 ## Installation
 
-`$ npm install nodejs-mobile-react-native --save`
+`$ npm install @comapeo/nodejs-mobile-react-native`
 
 For iOS, run `pod install` for linking the native code parts:
 
@@ -13,7 +13,7 @@ For iOS, run `pod install` for linking the native code parts:
 
 Universal binaries are included in the plugin, so you can run in both iOS simulators and devices.
 
-`nodejs-mobile-react-native` supports iOS 13.0 or later. In order to archive the application, the deployment target needs to be `iOS 13.0` or later. Your project's `ios/Podfile` may also need to be changed like this (if React Native's `min_ios_version_supported` is below 13):
+`@comapeo/nodejs-mobile-react-native` supports iOS 13.0 or later. In order to archive the application, the deployment target needs to be `iOS 13.0` or later. Your project's `ios/Podfile` may also need to be changed like this (if React Native's `min_ios_version_supported` is below 13):
 
 ```diff
 -platform :ios, min_ios_version_supported
@@ -33,11 +33,11 @@ export ANDROID_NDK_HOME=/Users/username/Library/Android/sdk/ndk-bundle
 
 ### `Node.js` project
 
-When `nodejs-mobile-react-native` was installed through npm, it created a `nodejs-assets/nodejs-project/` path inside your application. This path will be packaged with your application and the background project will be started using the `main.js` file inside. It contains a `sample-main.js` and `sample-package.json` files under `nodejs-assets/nodejs-project/`.
+When `@comapeo/nodejs-mobile-react-native` was installed through npm, it created a `nodejs-assets/nodejs-project/` path inside your application. This path will be packaged with your application and the background project will be started using the `main.js` file inside. It contains a `sample-main.js` and `sample-package.json` files under `nodejs-assets/nodejs-project/`.
 
 The `sample-main.js` and `sample-package.json` files contain a sample echo project. We advise to rename `sample-main.js` to `main.js` and `sample-package.json` to `package.json` to get you started easily.
 
-> Attention: The `sample-main.js` and `sample-package.json` will be overwritten with installs/updates of `nodejs-mobile-react-native`.
+> Attention: The `sample-main.js` and `sample-package.json` will be overwritten with installs/updates of `@comapeo/nodejs-mobile-react-native`.
 
 The sample `main.js` contents:
 ```js
@@ -106,10 +106,10 @@ If you are a maintainer of a native module and want to support prebuilds for nod
 
 ### `React-Native` application
 
-To communicate with Node.js from your `react-native` application, first import `nodejs-mobile-react-native`.
+To communicate with Node.js from your `react-native` application, first import `@comapeo/nodejs-mobile-react-native`.
 
 ```js
-import nodejs from 'nodejs-mobile-react-native';
+import nodejs from '@comapeo/nodejs-mobile-react-native';
 ```
 
 Then add this to your Application's main component's `componentWillMount` lifecycle event:
@@ -143,7 +143,7 @@ We can then define a button in our interface to send messages to our Node.js pro
 
 These methods can be called from the React Native javascript code directly:
 ```js
-import nodejs from 'nodejs-mobile-react-native';
+import nodejs from '@comapeo/nodejs-mobile-react-native';
 ```
 
 - `nodejs.start`
@@ -367,7 +367,7 @@ module.exports = {
 
 ## Changelog
 
-Releases are documented in [CHANGELOG.md](https://github.com/nodejs-mobile/nodejs-mobile-react-native/blob/unstable/CHANGELOG.md)
+Releases are documented in [CHANGELOG.md](https://github.com/digidem/nodejs-mobile-react-native/blob/main/CHANGELOG.md)
 
 ## Versioning
 

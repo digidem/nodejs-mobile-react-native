@@ -94,7 +94,7 @@ done
 
 # Apply patches to the modules package.json
 if [ -d "$NODEPROJ"/node_modules/ ]; then
-  PATCH_SCRIPT_DIR="$( cd "$PROJECT_DIR" && cd ../node_modules/nodejs-mobile-react-native/scripts/ && pwd )"
+  PATCH_SCRIPT_DIR="$( cd "$PROJECT_DIR" && cd ../node_modules/@comapeo/nodejs-mobile-react-native/scripts/ && pwd )"
   NODEJS_PROJECT_MODULES_DIR="$( cd "$NODEPROJ" && cd node_modules && pwd )"
   node "$PATCH_SCRIPT_DIR"/patch-package.js $NODEJS_PROJECT_MODULES_DIR
 fi
@@ -108,7 +108,7 @@ if [ -f ~/.cargo/env ]; then
 fi
 
 # Rebuild modules with right environment
-NODEJS_HEADERS_DIR="$( cd "$PROJECT_DIR" && cd ../node_modules/nodejs-mobile-react-native/ios/libnode/ && pwd )"
+NODEJS_HEADERS_DIR="$( cd "$PROJECT_DIR" && cd ../node_modules/@comapeo/nodejs-mobile-react-native/ios/libnode/ && pwd )"
 pushd $NODEPROJ
 if [ "$PLATFORM_NAME" == "iphoneos" ]; then
   GYP_DEFINES="OS=ios" \
