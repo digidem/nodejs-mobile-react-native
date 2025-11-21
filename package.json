@@ -1,6 +1,6 @@
 {
   "name": "@comapeo/nodejs-mobile-react-native",
-  "version": "18.20.4-1",
+  "version": "18.20.4-2",
   "description": "Node.js for Mobile Apps React Native plugin",
   "main": "index.js",
   "scripts": {

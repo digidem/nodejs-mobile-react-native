@@ -7,7 +7,8 @@
 <tr>
 <td>
 
-<a href="#18.20.4-0">18.20.4-1</a><br/>
+<a href="#18.20.4-2">18.20.4-2</a><br/>
+<a href="#18.20.4-1">18.20.4-1</a><br/>
 <a href="#18.20.4-0">18.20.4-0</a><br/>
 <a href="#18.20.4">18.20.4</a><br/>
 <a href="#18.17.8">18.17.8</a><br/>
@@ -58,8 +59,16 @@
 </tr>
 </table>
 
+<a id="18.20.4-2"></a>
+## 2025-11-21, Version 18.20.4-2 (Current)
+
+### Notable Changes
+
+* Update Android configuration to fix issues when building APK.
+
+
 <a id="18.20.4-1"></a>
-## 2025-11-20, Version 18.20.4-1 (Current)
+## 2025-11-20, Version 18.20.4-1
 
 ### Notable Changes
 
